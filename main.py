@@ -45,33 +45,56 @@ TEMPLATES = {
 }
 
 
-def split_into_chapters(document: "docx.Document"):
-    """Heading 1 스타일 기준으로 챕터를 나눕니다. 없으면 전체를 한 챕터로 취급합니다."""
-    chapters = []
-    current_title = None
-    current_paragraphs = []
+def get_paragraph_html(para) -> str:
+    """문단 안의 텍스트를 가져오되, 수동 줄바꿈(Shift+Enter)은 <br/>로 보존합니다."""
+    from docx.oxml.ns import qn
+
+    parts = []
+    for run in para.runs:
+        for child in run._element:
+            tag = child.tag.split("}")[-1]
+            if tag == "t":
+                parts.append(escape_html(child.text or ""))
+            elif tag == "br":
+                parts.append("<br/>")
+            elif tag == "tab":
+                parts.append("&#9;")
+    return "".join(parts)
+
+
+def build_heading_tree(document: "docx.Document"):
+    """
+    '제목 1' ~ '제목 6' 스타일을 몇 단계든 자동으로 인식해 트리 구조를 만듭니다.
+    'Title' 스타일 문단은 표지 텍스트로 취급해 최상위(root) 문단에 포함시킵니다.
+    """
+    root = {"title": None, "level": 0, "paras": [], "children": []}
+    stack = [root]
 
     for para in document.paragraphs:
         text = para.text.strip()
         style_name = (para.style.name or "").lower()
-        is_heading1 = "heading 1" in style_name or style_name == "title"
 
-        if is_heading1 and text:
-            if current_title is not None or current_paragraphs:
-                chapters.append((current_title or "시작", current_paragraphs))
-            current_title = text
-            current_paragraphs = []
+        if style_name == "title":
+            html = get_paragraph_html(para)
+            if html.strip():
+                root["paras"].append(html)
+            continue
+
+        m = re.match(r"heading (\d+)", style_name)
+        level = int(m.group(1)) if m else None
+
+        if level is not None and text:
+            while len(stack) > 1 and stack[-1]["level"] >= level:
+                stack.pop()
+            node = {"title": text, "level": level, "paras": [], "children": []}
+            stack[-1]["children"].append(node)
+            stack.append(node)
         else:
-            if text:
-                current_paragraphs.append(text)
+            html = get_paragraph_html(para)
+            if html.strip():
+                stack[-1]["paras"].append(html)
 
-    if current_title is not None or current_paragraphs:
-        chapters.append((current_title or "본문", current_paragraphs))
-
-    if not chapters:
-        chapters = [("본문", ["(빈 문서입니다)"])]
-
-    return chapters
+    return root
 
 
 def escape_html(text: str) -> str:
@@ -92,7 +115,7 @@ def build_epub(
     template_key: str,
 ) -> bytes:
     document = docx.Document(io.BytesIO(docx_bytes))
-    chapters_data = split_into_chapters(document)
+    tree = build_heading_tree(document)
     template = TEMPLATES.get(template_key, TEMPLATES["essay"])
 
     book = epub.EpubBook()
@@ -112,26 +135,48 @@ def build_epub(
     )
     book.add_item(style_item)
 
-    epub_chapters = []
-    for idx, (chap_title, paragraphs) in enumerate(chapters_data, start=1):
-        file_name = f"chap_{idx:03d}.xhtml"
-        body_html = f"<h1>{escape_html(chap_title)}</h1>\n"
-        body_html += "\n".join(f"<p>{escape_html(p)}</p>" for p in paragraphs)
+    all_chapters_flat = []
+    counter = 0
 
-        c = epub.EpubHtml(
-            title=chap_title,
-            file_name=file_name,
-            lang=language or "ko",
-        )
+    def make_chapter(chap_title: str, paras: list) -> "epub.EpubHtml":
+        nonlocal counter
+        counter += 1
+        file_name = f"chap_{counter:03d}.xhtml"
+        body_html = f"<h1>{escape_html(chap_title)}</h1>\n" if chap_title else ""
+        body_html += "\n".join(f"<p>{html}</p>" for html in paras)
+        c = epub.EpubHtml(title=chap_title or f"챕터 {counter}", file_name=file_name, lang=language or "ko")
         c.content = f"<html><head></head><body>{body_html}</body></html>"
         c.add_item(style_item)
         book.add_item(c)
-        epub_chapters.append(c)
+        all_chapters_flat.append(c)
+        return c
 
-    book.toc = tuple(epub_chapters)
+    def process_node(node):
+        """노드를 EPUB 챕터/섹션으로 변환. 반환값은 EpubHtml 또는 (Section, tuple) 입니다."""
+        chap = make_chapter(node["title"], node["paras"])
+        if node["children"]:
+            child_entries = [process_node(c) for c in node["children"]]
+            return (epub.Section(node["title"], href=chap.file_name), tuple(child_entries))
+        return chap
+
+    toc_entries = []
+
+    # 표지/제목 등 root의 문단(첫 제목 앞의 내용)이 있으면 별도 챕터로
+    if tree["paras"]:
+        intro_chap = make_chapter(title or "시작", tree["paras"])
+        toc_entries.append(intro_chap)
+
+    for child in tree["children"]:
+        toc_entries.append(process_node(child))
+
+    if not all_chapters_flat:
+        make_chapter("본문", ["(빈 문서입니다)"])
+        toc_entries = list(all_chapters_flat)
+
+    book.toc = tuple(toc_entries)
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-    book.spine = ["nav"] + epub_chapters
+    book.spine = ["nav"] + all_chapters_flat
 
     out = io.BytesIO()
     epub.write_epub(out, book)
