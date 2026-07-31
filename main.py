@@ -16,6 +16,7 @@ Render 같은 무료 서버가 재시작되거나 여러 인스턴스로 떠도 
 """
 
 import io
+import json
 import re
 import uuid
 from typing import List, Optional
@@ -334,6 +335,7 @@ async def index():
         f'<option value="{key}">{val["label"]}</option>'
         for key, val in TEMPLATES.items()
     )
+    css_map_json = json.dumps({key: val["css"] for key, val in TEMPLATES.items()})
     return f"""
 <!DOCTYPE html>
 <html lang="ko">
@@ -407,6 +409,45 @@ async def index():
   .toolbar .title {{ font-size:14px; font-weight:600; }}
   .toolbar .count {{ font-size:12px; color:var(--sub); font-weight:400; }}
   .toolbar-actions {{ display:flex; gap:8px; }}
+
+  .layout {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; margin-top:4px; }}
+  @media (max-width:920px) {{ .layout {{ grid-template-columns:1fr; }} }}
+  .editor-col {{ min-width:0; }}
+  .preview-col {{ min-width:0; position:sticky; top:64px; }}
+  @media (max-width:920px) {{ .preview-col {{ position:static; }} }}
+
+  .preview-head {{
+    padding:10px 2px 12px; font-size:13px; font-weight:600; color:var(--text);
+  }}
+  .preview-head .preview-sub {{
+    font-size:11.5px; font-weight:400; color:var(--sub); margin-top:3px; line-height:1.5;
+  }}
+  .preview-pages {{
+    display:flex; flex-direction:column; gap:16px; max-height:calc(100vh - 150px); overflow-y:auto;
+    padding:4px 4px 20px 2px;
+  }}
+  @media (max-width:920px) {{ .preview-pages {{ max-height:520px; }} }}
+  .page-card {{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;
+  }}
+  .page-card .page-label {{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    font-size:12px; padding:9px 12px; border-bottom:1px solid var(--border);
+    background:var(--panel2);
+  }}
+  .page-card .page-label .file-badge {{
+    display:inline-flex; align-items:center; gap:6px; font-weight:700; color:var(--accent); font-size:11.5px;
+  }}
+  .page-card .page-label .file-badge .dot {{
+    width:6px; height:6px; border-radius:50%; background:var(--accent);
+  }}
+  .page-card .page-label .file-name {{
+    font-family:'IBM Plex Mono', monospace; font-size:10px; color:var(--sub); white-space:nowrap;
+  }}
+  .page-card iframe {{
+    width:100%; border:none; display:block; background:#fff;
+  }}
+  .empty-preview {{ font-size:12.5px; color:var(--sub); padding:20px 8px; text-align:center; }}
 
   .tree {{ margin-top:18px; }}
 
@@ -525,15 +566,29 @@ async def index():
       </div>
     </div>
 
-    <div class="tree" id="chapterTree"></div>
-
-    <hr class="sep">
-    <button class="secondary" id="backBtn" type="button">← 다른 파일 다시 불러오기</button>
-    <div id="status"></div>
+    <div class="layout">
+      <div class="editor-col">
+        <div class="tree" id="chapterTree"></div>
+        <hr class="sep">
+        <button class="secondary" id="backBtn" type="button">← 다른 파일 다시 불러오기</button>
+        <div id="status"></div>
+      </div>
+      <div class="preview-col">
+        <div class="preview-head">
+          <div>실제 파일 미리보기</div>
+          <div class="preview-sub">카드 한 장 = 이펍 안에 실제로 만들어지는 파일 한 개입니다. <span id="fileCountNote"></span></div>
+        </div>
+        <div class="preview-pages" id="previewPages">
+          <div class="empty-preview">원고를 불러오면 여기에 실제 파일 구성이 표시됩니다.</div>
+        </div>
+      </div>
+    </div>
   </div>
 
 <script>
+const TEMPLATE_CSS = {css_map_json};
 let rootData = null;
+let previewDebounce = null;
 
 function nodeLabel(level) {{
   if (level === 0) return '표지';
@@ -637,6 +692,105 @@ function collectNode(el) {{
   }};
 }}
 
+// --- 아래부터는 미리보기 전용 함수들. 백엔드의 build_epub_from_structure()/walk()/
+//     render_body_html()과 동일한 규칙으로 "실제로 몇 페이지가 만들어지는지"를
+//     화면에서 그대로 흉내 냅니다. 서버에 요청하지 않고 브라우저에서 바로 계산합니다.
+
+function escapeHtmlJs(text) {{
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}}
+
+function renderBodyHtmlJs(bodyText) {{
+  if (!bodyText || !bodyText.trim()) return '';
+  return bodyText.split('\\n\\n')
+    .map(p => p.trim())
+    .filter(p => p.length > 0)
+    .map(p => '<p>' + escapeHtmlJs(p).replace(/\\n/g, '<br/>') + '</p>')
+    .join('\\n');
+}}
+
+/**
+ * node 트리를 순회하며 "실제로 새 페이지가 되는 노드"만 pages 배열에 담습니다.
+ * split=false인 노드는 새 페이지를 만들지 않고, 가장 가까운 상위 페이지의
+ * html 뒤에 소제목(h2~h6)+본문으로 이어붙입니다. (백엔드 walk()와 동일한 규칙)
+ */
+function computePages(node, pages, parentPage) {{
+  let page = parentPage;
+  if (page === null || node.split) {{
+    page = {{ title: node.title, level: node.level, html: '' }};
+    page.html += node.title ? ('<h1>' + escapeHtmlJs(node.title) + '</h1>\\n') : '';
+    page.html += renderBodyHtmlJs(node.body);
+    pages.push(page);
+  }} else {{
+    const tag = 'h' + Math.min(Math.max(node.level, 2) + 1, 6);
+    page.html += '<div style="margin:18px 0 4px; padding:12px 14px; background:rgba(76,141,255,0.06); ' +
+      'border-left:3px solid rgba(76,141,255,0.35); border-radius:0 6px 6px 0;">';
+    page.html += '<div style="font-size:10.5px; color:#6b7fb0; margin-bottom:6px;">같은 파일 안 소제목 (새 파일 아님)</div>';
+    page.html += '<' + tag + ' style="margin:0 0 6px;">' + escapeHtmlJs(node.title) + '</' + tag + '>\\n';
+    page.html += renderBodyHtmlJs(node.body);
+    page.html += '</div>';
+  }}
+  (node.children || []).forEach(child => computePages(child, pages, page));
+  return pages;
+}}
+
+function renderPreview() {{
+  const container = document.getElementById('previewPages');
+  if (!rootData) return;
+
+  const rootEl = document.querySelector('#chapterTree > .node');
+  if (!rootEl) return;
+  const currentTree = collectNode(rootEl);
+
+  const pages = computePages(currentTree, [], null);
+  const css = TEMPLATE_CSS[document.getElementById('templateKey').value] || '';
+
+  container.innerHTML = '';
+  if (pages.length === 0) {{
+    container.innerHTML = '<div class="empty-preview">표시할 파일이 없습니다.</div>';
+    return;
+  }}
+
+  const fileCountNote = document.getElementById('fileCountNote');
+  if (fileCountNote) {{
+    fileCountNote.textContent = '지금 상태로는 총 ' + pages.length + '개 파일이 만들어집니다.';
+  }}
+
+  pages.forEach((page, idx) => {{
+    const fileNum = String(idx + 1).padStart(3, '0');
+    const card = document.createElement('div');
+    card.className = 'page-card';
+
+    const labelBar = document.createElement('div');
+    labelBar.className = 'page-label';
+    labelBar.innerHTML =
+      '<span class="file-badge"><span class="dot"></span>파일 ' + (idx + 1) + '</span>' +
+      '<span class="file-name">chap_' + fileNum + '.xhtml</span>';
+    card.appendChild(labelBar);
+
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('scrolling', 'no');
+    card.appendChild(iframe);
+    container.appendChild(card);
+
+    const doc = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<style>html,body{{margin:0;}} ' + css + '</style></head>' +
+      '<body>' + page.html + '</body></html>';
+    iframe.srcdoc = doc;
+    iframe.addEventListener('load', () => {{
+      try {{
+        const h = iframe.contentWindow.document.body.scrollHeight;
+        iframe.style.height = Math.max(60, h + 24) + 'px';
+      }} catch (e) {{ iframe.style.height = '200px'; }}
+    }});
+  }});
+}}
+
+function schedulePreview() {{
+  clearTimeout(previewDebounce);
+  previewDebounce = setTimeout(renderPreview, 220);
+}}
+
 document.getElementById('parseBtn').addEventListener('click', async () => {{
   const fileInput = document.getElementById('fileInput');
   const uploadStatus = document.getElementById('uploadStatus');
@@ -669,6 +823,11 @@ document.getElementById('parseBtn').addEventListener('click', async () => {{
     document.getElementById('uploadSection').style.display = 'none';
     document.getElementById('editSection').style.display = 'block';
     uploadStatus.textContent = '';
+
+    // 제목/본문/체크박스가 바뀔 때마다(입력 중에도) 미리보기를 다시 계산
+    treeEl.addEventListener('input', schedulePreview);
+    treeEl.addEventListener('change', schedulePreview);
+    renderPreview();
   }} catch (err) {{
     uploadStatus.textContent = '오류: ' + err.message;
   }}
@@ -680,6 +839,8 @@ document.getElementById('backBtn').addEventListener('click', () => {{
   document.getElementById('fileInput').value = '';
   document.getElementById('status').textContent = '';
 }});
+
+document.getElementById('templateKey').addEventListener('change', renderPreview);
 
 document.getElementById('expandAllBtn').addEventListener('click', () => {{
   document.querySelectorAll('#chapterTree .node').forEach(el => el.classList.remove('collapsed'));
