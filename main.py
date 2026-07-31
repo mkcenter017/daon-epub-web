@@ -352,7 +352,7 @@ async def index():
   * {{ box-sizing:border-box; }}
   body {{
     font-family:'Pretendard', -apple-system, sans-serif; background:var(--bg); color:var(--text);
-    max-width:760px; margin:0 auto; padding:0 20px 80px;
+    max-width:1560px; margin:0 auto; padding:0 32px 80px;
   }}
   h1 {{ font-size:21px; margin:28px 0 4px; }}
   .notice {{
@@ -398,7 +398,7 @@ async def index():
     background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px;
     margin-top:18px;
   }}
-  .meta-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }}
+  .meta-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px 18px; }}
   .meta-grid .full {{ grid-column:1 / -1; }}
 
   .toolbar {{
@@ -425,7 +425,7 @@ async def index():
 
   .outline-box {{
     background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    padding:6px; max-height:280px; overflow-y:auto;
+    padding:6px; max-height:360px; overflow-y:auto;
   }}
   .outline-row {{
     display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:6px;
@@ -490,16 +490,15 @@ async def index():
   .node.collapsed > .node-head .caret {{ transform:rotate(-90deg); }}
 
   .level-badge {{
-    flex:none; font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:20px;
-    white-space:nowrap; letter-spacing:0.02em;
+    flex:none; width:11px; height:11px; border-radius:50%; margin-right:1px;
   }}
-  .node[data-level="0"] .level-badge {{ background:rgba(76,141,255,0.18); color:var(--lv1); }}
-  .node[data-level="1"] .level-badge {{ background:rgba(76,141,255,0.18); color:var(--lv1); }}
-  .node[data-level="2"] .level-badge {{ background:rgba(94,230,217,0.16); color:var(--lv2); }}
-  .node[data-level="3"] .level-badge {{ background:rgba(242,196,109,0.16); color:var(--lv3); }}
-  .node[data-level="4"] .level-badge {{ background:rgba(242,141,141,0.16); color:var(--lv4); }}
-  .node[data-level="5"] .level-badge {{ background:rgba(200,155,242,0.16); color:var(--lv5); }}
-  .node[data-level="6"] .level-badge {{ background:rgba(140,151,184,0.16); color:var(--lv6); }}
+  .node[data-level="0"] .level-badge {{ background:var(--lv1); }}
+  .node[data-level="1"] .level-badge {{ background:var(--lv1); }}
+  .node[data-level="2"] .level-badge {{ background:var(--lv2); }}
+  .node[data-level="3"] .level-badge {{ background:var(--lv3); }}
+  .node[data-level="4"] .level-badge {{ background:var(--lv4); }}
+  .node[data-level="5"] .level-badge {{ background:var(--lv5); }}
+  .node[data-level="6"] .level-badge {{ background:var(--lv6); }}
 
   .node-head input[type=text] {{
     flex:1 1 auto; min-width:0; background:transparent; border:1px solid transparent; padding:5px 7px;
@@ -633,7 +632,7 @@ function renderNode(node, container, depth) {{
 
   const badge = document.createElement('span');
   badge.className = 'level-badge';
-  badge.textContent = nodeLabel(node.level);
+  badge.title = nodeLabel(node.level);
   head.appendChild(badge);
 
   const titleInput = document.createElement('input');
