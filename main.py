@@ -422,31 +422,45 @@ async def index():
   .preview-head .preview-sub {{
     font-size:11.5px; font-weight:400; color:var(--sub); margin-top:3px; line-height:1.5;
   }}
-  .preview-pages {{
-    display:flex; flex-direction:column; gap:16px; max-height:calc(100vh - 150px); overflow-y:auto;
-    padding:4px 4px 20px 2px;
+
+  .outline-box {{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:6px; max-height:280px; overflow-y:auto;
   }}
-  @media (max-width:920px) {{ .preview-pages {{ max-height:520px; }} }}
-  .page-card {{
-    background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;
+  .outline-row {{
+    display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:6px;
+    cursor:pointer; font-size:13px; font-weight:600;
   }}
-  .page-card .page-label {{
+  .outline-row:hover {{ background:var(--panel2); }}
+  .outline-row.selected {{ background:var(--accent-soft); }}
+  .outline-row .file-tag {{
+    flex:none; font-size:10px; font-weight:700; color:var(--accent);
+    background:rgba(76,141,255,0.14); padding:2px 7px; border-radius:20px; white-space:nowrap;
+  }}
+  .outline-row .row-title {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .outline-row.sub {{
+    margin-left:22px; font-weight:400; font-size:12px; color:var(--sub);
+  }}
+  .outline-row.sub .arrow {{ flex:none; opacity:0.55; }}
+  .outline-row.sub.selected {{ color:var(--text); }}
+
+  .selected-preview {{
+    margin-top:14px; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden;
+  }}
+  .selected-preview .sp-label {{
     display:flex; align-items:center; justify-content:space-between; gap:8px;
-    font-size:12px; padding:9px 12px; border-bottom:1px solid var(--border);
-    background:var(--panel2);
+    font-size:12px; padding:9px 12px; border-bottom:1px solid var(--border); background:var(--panel2);
   }}
-  .page-card .page-label .file-badge {{
+  .selected-preview .sp-label .file-badge {{
     display:inline-flex; align-items:center; gap:6px; font-weight:700; color:var(--accent); font-size:11.5px;
   }}
-  .page-card .page-label .file-badge .dot {{
+  .selected-preview .sp-label .file-badge .dot {{
     width:6px; height:6px; border-radius:50%; background:var(--accent);
   }}
-  .page-card .page-label .file-name {{
-    font-family:'IBM Plex Mono', monospace; font-size:10px; color:var(--sub); white-space:nowrap;
+  .selected-preview .sp-label .file-name {{
+    font-family:monospace; font-size:10px; color:var(--sub); white-space:nowrap;
   }}
-  .page-card iframe {{
-    width:100%; border:none; display:block; background:#fff;
-  }}
+  .selected-preview iframe {{ width:100%; border:none; display:block; background:#fff; min-height:120px; }}
   .empty-preview {{ font-size:12.5px; color:var(--sub); padding:20px 8px; text-align:center; }}
 
   .tree {{ margin-top:18px; }}
@@ -575,12 +589,13 @@ async def index():
       </div>
       <div class="preview-col">
         <div class="preview-head">
-          <div>실제 파일 미리보기</div>
-          <div class="preview-sub">카드 한 장 = 이펍 안에 실제로 만들어지는 파일 한 개입니다. <span id="fileCountNote"></span></div>
+          <div>파일 구성 한눈에 보기</div>
+          <div class="preview-sub">굵은 글씨 = 새 파일, 흐리고 들여쓰기된 글씨 = 같은 파일 안 소제목. <span id="fileCountNote"></span><br>항목을 클릭하면 아래에 실제 페이지 모습이 보입니다.</div>
         </div>
-        <div class="preview-pages" id="previewPages">
-          <div class="empty-preview">원고를 불러오면 여기에 실제 파일 구성이 표시됩니다.</div>
+        <div class="outline-box" id="outlineList">
+          <div class="empty-preview">원고를 불러오면 여기에 파일 구성이 표시됩니다.</div>
         </div>
+        <div class="selected-preview" id="selectedPreview" style="display:none;"></div>
       </div>
     </div>
   </div>
@@ -592,9 +607,7 @@ let previewDebounce = null;
 
 function nodeLabel(level) {{
   if (level === 0) return '표지';
-  if (level === 1) return '부';
-  if (level === 2) return '장';
-  return '레벨 ' + level;
+  return '레벨 ' + level + ' 제목';
 }}
 
 function countNodes(node) {{
@@ -693,8 +706,14 @@ function collectNode(el) {{
 }}
 
 // --- 아래부터는 미리보기 전용 함수들. 백엔드의 build_epub_from_structure()/walk()/
-//     render_body_html()과 동일한 규칙으로 "실제로 몇 페이지가 만들어지는지"를
+//     render_body_html()과 동일한 규칙으로 "실제로 몇 개의 파일이 만들어지는지"를
 //     화면에서 그대로 흉내 냅니다. 서버에 요청하지 않고 브라우저에서 바로 계산합니다.
+//
+//     예전 버전은 모든 파일을 동시에 실제 페이지로 렌더링했는데, 파일 수가 많아지면
+//     (1) iframe이 한 번에 너무 많이 생성되어 높이 계산이 깨지고
+//     (2) 화면이 빽빽해져서 오히려 구조를 파악하기 어려운 문제가 있었습니다.
+//     그래서 지금은 "목차 리스트"만 항상 보여주고, 실제 페이지 렌더링은 클릭한
+//     항목 하나에 대해서만 수행합니다.
 
 function escapeHtmlJs(text) {{
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -709,19 +728,25 @@ function renderBodyHtmlJs(bodyText) {{
     .join('\\n');
 }}
 
+let selectedFileIndex = null;
+
 /**
- * node 트리를 순회하며 "실제로 새 페이지가 되는 노드"만 pages 배열에 담습니다.
- * split=false인 노드는 새 페이지를 만들지 않고, 가장 가까운 상위 페이지의
+ * node 트리를 순회하며 "실제로 새 파일이 되는 노드"만 pages 배열에 담고,
+ * 동시에 화면에 뿌릴 목차 항목(outline)도 함께 만듭니다.
+ * split=false인 노드는 새 파일을 만들지 않고, 가장 가까운 상위 파일의
  * html 뒤에 소제목(h2~h6)+본문으로 이어붙입니다. (백엔드 walk()와 동일한 규칙)
  */
-function computePages(node, pages, parentPage) {{
-  let page = parentPage;
-  if (page === null || node.split) {{
-    page = {{ title: node.title, level: node.level, html: '' }};
+function buildPreviewData(node, pages, outline, parentPageIdx) {{
+  let pageIdx = parentPageIdx;
+  if (parentPageIdx === null || node.split) {{
+    const page = {{ title: node.title, html: '' }};
     page.html += node.title ? ('<h1>' + escapeHtmlJs(node.title) + '</h1>\\n') : '';
     page.html += renderBodyHtmlJs(node.body);
     pages.push(page);
+    pageIdx = pages.length - 1;
+    outline.push({{ type: 'file', title: node.title || '(제목 없음)', pageIdx: pageIdx }});
   }} else {{
+    const page = pages[pageIdx];
     const tag = 'h' + Math.min(Math.max(node.level, 2) + 1, 6);
     page.html += '<div style="margin:18px 0 4px; padding:12px 14px; background:rgba(76,141,255,0.06); ' +
       'border-left:3px solid rgba(76,141,255,0.35); border-radius:0 6px 6px 0;">';
@@ -729,61 +754,93 @@ function computePages(node, pages, parentPage) {{
     page.html += '<' + tag + ' style="margin:0 0 6px;">' + escapeHtmlJs(node.title) + '</' + tag + '>\\n';
     page.html += renderBodyHtmlJs(node.body);
     page.html += '</div>';
+    outline.push({{ type: 'sub', title: node.title || '(제목 없음)', pageIdx: pageIdx }});
   }}
-  (node.children || []).forEach(child => computePages(child, pages, page));
-  return pages;
+  (node.children || []).forEach(child => buildPreviewData(child, pages, outline, pageIdx));
+  return {{ pages, outline }};
+}}
+
+function showSelectedPage(pages) {{
+  const box = document.getElementById('selectedPreview');
+  if (selectedFileIndex === null || !pages[selectedFileIndex]) {{
+    box.style.display = 'none';
+    return;
+  }}
+  box.style.display = 'block';
+  box.innerHTML = '';
+
+  const page = pages[selectedFileIndex];
+  const fileNum = String(selectedFileIndex + 1).padStart(3, '0');
+
+  const labelBar = document.createElement('div');
+  labelBar.className = 'sp-label';
+  labelBar.innerHTML =
+    '<span class="file-badge"><span class="dot"></span>파일 ' + (selectedFileIndex + 1) + '</span>' +
+    '<span class="file-name">chap_' + fileNum + '.xhtml</span>';
+  box.appendChild(labelBar);
+
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('scrolling', 'no');
+  // load 리스너를 srcdoc 할당 "전"에 먼저 등록해야, 브라우저가 콘텐츠를 빨리
+  // 그려버려서 load 이벤트를 놓치는 경우(=높이 계산이 안 되는 버그)를 막을 수 있습니다.
+  iframe.addEventListener('load', () => {{
+    try {{
+      const h = iframe.contentWindow.document.body.scrollHeight;
+      iframe.style.height = Math.max(120, h + 28) + 'px';
+    }} catch (e) {{ iframe.style.height = '200px'; }}
+  }});
+  box.appendChild(iframe);
+
+  const css = TEMPLATE_CSS[document.getElementById('templateKey').value] || '';
+  const doc = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+    '<style>html,body{{margin:0;}} ' + css + '</style></head>' +
+    '<body>' + page.html + '</body></html>';
+  iframe.srcdoc = doc;
 }}
 
 function renderPreview() {{
-  const container = document.getElementById('previewPages');
+  const outlineBox = document.getElementById('outlineList');
   if (!rootData) return;
 
   const rootEl = document.querySelector('#chapterTree > .node');
   if (!rootEl) return;
   const currentTree = collectNode(rootEl);
 
-  const pages = computePages(currentTree, [], null);
-  const css = TEMPLATE_CSS[document.getElementById('templateKey').value] || '';
-
-  container.innerHTML = '';
-  if (pages.length === 0) {{
-    container.innerHTML = '<div class="empty-preview">표시할 파일이 없습니다.</div>';
-    return;
-  }}
+  const {{ pages, outline }} = buildPreviewData(currentTree, [], [], null);
 
   const fileCountNote = document.getElementById('fileCountNote');
   if (fileCountNote) {{
     fileCountNote.textContent = '지금 상태로는 총 ' + pages.length + '개 파일이 만들어집니다.';
   }}
 
-  pages.forEach((page, idx) => {{
-    const fileNum = String(idx + 1).padStart(3, '0');
-    const card = document.createElement('div');
-    card.className = 'page-card';
+  outlineBox.innerHTML = '';
+  if (outline.length === 0) {{
+    outlineBox.innerHTML = '<div class="empty-preview">표시할 항목이 없습니다.</div>';
+  }} else {{
+    outline.forEach(entry => {{
+      const row = document.createElement('div');
+      row.className = 'outline-row' + (entry.type === 'sub' ? ' sub' : '');
+      if (entry.pageIdx === selectedFileIndex) row.classList.add('selected');
 
-    const labelBar = document.createElement('div');
-    labelBar.className = 'page-label';
-    labelBar.innerHTML =
-      '<span class="file-badge"><span class="dot"></span>파일 ' + (idx + 1) + '</span>' +
-      '<span class="file-name">chap_' + fileNum + '.xhtml</span>';
-    card.appendChild(labelBar);
-
-    const iframe = document.createElement('iframe');
-    iframe.setAttribute('scrolling', 'no');
-    card.appendChild(iframe);
-    container.appendChild(card);
-
-    const doc = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-      '<style>html,body{{margin:0;}} ' + css + '</style></head>' +
-      '<body>' + page.html + '</body></html>';
-    iframe.srcdoc = doc;
-    iframe.addEventListener('load', () => {{
-      try {{
-        const h = iframe.contentWindow.document.body.scrollHeight;
-        iframe.style.height = Math.max(60, h + 24) + 'px';
-      }} catch (e) {{ iframe.style.height = '200px'; }}
+      if (entry.type === 'file') {{
+        row.innerHTML = '<span class="file-tag">파일 ' + (entry.pageIdx + 1) + '</span>' +
+          '<span class="row-title">' + escapeHtmlJs(entry.title) + '</span>';
+      }} else {{
+        row.innerHTML = '<span class="arrow">↳</span>' +
+          '<span class="row-title">' + escapeHtmlJs(entry.title) + '</span>';
+      }}
+      row.addEventListener('click', () => {{
+        selectedFileIndex = entry.pageIdx;
+        renderPreview();
+      }});
+      outlineBox.appendChild(row);
     }});
-  }});
+  }}
+
+  if (selectedFileIndex !== null && selectedFileIndex >= pages.length) {{
+    selectedFileIndex = null;
+  }}
+  showSelectedPage(pages);
 }}
 
 function schedulePreview() {{
