@@ -1,39 +1,36 @@
 """
-다온 EPUB 변환기 (웹 버전) - 2단계: DOCX to EPUB
-FastAPI 기반. python-docx로 원고를 읽고, ebooklib으로 EPUB을 생성합니다.
+다온 EPUB 변환기 (웹 버전) - 3단계: DOCX to EPUB + 변환 후 수정 기능
 
-수정 내역 (오류 리포트 반영):
-1. 제목 입력 필수 해제 -> 워드의 "Title" 스타일을 자동 추출해 진짜 제목으로 사용
-2. 저자 미입력 시 "저자 미상"으로 기본값 채움 (PC 버전과 동일 정책)
-3. 목차(nav)를 spine 맨 앞이 아니라 표지(1번 챕터) 다음으로 이동
-4. 챕터 분할 기준을 Heading 1(부)·Heading 2(장)까지로 제한.
-   Heading 3 이상은 새 파일을 만들지 않고, 같은 챕터 파일 안의 소제목(anchor)으로 삽입
-5. 문단 앞뒤 공백(trim) 처리 추가 -> 저자명 등에 남아있던 긴 공백 제거
-6. EPUB 2.0 / 3.0 선택 기능 추가
+흐름
+----
+1) POST /parse   : 워드 파일을 업로드하면, 실제 EPUB을 만들지 않고
+                    "편집 가능한 구조(JSON)"만 만들어서 돌려줍니다.
+                    (제목/저자/장별 제목/본문 텍스트/새 페이지 분리 여부)
+2) 프론트엔드에서 그 구조를 화면에 폼으로 그려서, 사용자가 직접 수정합니다.
+3) POST /build    : 수정된 구조(JSON)를 그대로 받아서, 그때 비로소 실제
+                    EPUB 파일을 만들어 다운로드로 내려줍니다.
+
+서버에는 아무 상태도 저장하지 않습니다(stateless). 수정된 데이터는 전부
+브라우저가 들고 있다가 /build 호출 때 통째로 다시 보내주는 구조라서,
+Render 같은 무료 서버가 재시작되거나 여러 인스턴스로 떠도 문제가 없습니다.
 """
 
 import io
 import re
 import uuid
-from pathlib import Path
+from typing import List, Optional
 
 from fastapi import FastAPI, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 import docx
 from ebooklib import epub
 
 app = FastAPI(title="다온 EPUB 변환기")
 
-# ---------------------------------------------------------------------------
-# 챕터 분할 기준: 이 레벨까지만 "새 파일(페이지)"을 만듭니다.
-#   Heading 1 = 부(Part)
-#   Heading 2 = 장(Chapter)
-#   Heading 3 이상 = 장 안의 소제목 -> 새 파일 대신 같은 파일 안 앵커(#id)로 삽입
-# 원고 구조가 다르면 이 숫자만 조정하면 됩니다.
-# ---------------------------------------------------------------------------
-MAX_SPLIT_LEVEL = 2
+# 이 레벨(포함)까지는 기본적으로 "새 페이지"로 분리합니다. (수정 화면에서 개별적으로 덮어쓸 수 있음)
+DEFAULT_SPLIT_LEVEL = 2
 
 TEMPLATES = {
     "essay": {
@@ -41,9 +38,8 @@ TEMPLATES = {
         "css": """
             body { font-family: 'Noto Serif KR', serif; line-height: 1.9; margin: 5% 6%; }
             h1 { font-size: 1.5em; margin-bottom: 1.2em; text-align: center; }
-            h2, h3, h4 { margin-top: 2em; margin-bottom: 0.8em; }
+            h2, h3, h4, h5, h6 { margin-top: 2em; margin-bottom: 0.8em; }
             p { margin: 0 0 1em 0; text-indent: 1em; }
-            p.subtitle { text-align: center; text-indent: 0; font-style: italic; color: #555; }
         """,
     },
     "novel": {
@@ -51,9 +47,8 @@ TEMPLATES = {
         "css": """
             body { font-family: 'Noto Serif KR', serif; line-height: 2.0; margin: 6% 7%; }
             h1 { font-size: 1.6em; margin-bottom: 1.5em; text-align: center; letter-spacing: 0.05em; }
-            h2, h3, h4 { margin-top: 2em; margin-bottom: 0.8em; }
+            h2, h3, h4, h5, h6 { margin-top: 2em; margin-bottom: 0.8em; }
             p { margin: 0 0 0.8em 0; text-indent: 1em; }
-            p.subtitle { text-align: center; text-indent: 0; font-style: italic; color: #555; }
         """,
     },
     "practical": {
@@ -61,13 +56,16 @@ TEMPLATES = {
         "css": """
             body { font-family: 'Noto Sans KR', sans-serif; line-height: 1.7; margin: 5%; }
             h1 { font-size: 1.4em; margin-bottom: 1em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }
-            h2, h3, h4 { margin-top: 1.6em; margin-bottom: 0.6em; }
+            h2, h3, h4, h5, h6 { margin-top: 1.6em; margin-bottom: 0.6em; }
             p { margin: 0 0 1em 0; }
-            p.subtitle { text-align: center; font-style: italic; color: #555; }
         """,
     },
 }
 
+
+# ---------------------------------------------------------------------------
+# 공통 유틸
+# ---------------------------------------------------------------------------
 
 def escape_html(text: str) -> str:
     return (
@@ -77,86 +75,161 @@ def escape_html(text: str) -> str:
     )
 
 
-def get_paragraph_html(para) -> str:
-    """문단 안의 텍스트를 가져오되, 수동 줄바꿈(Shift+Enter)은 <br/>로 보존합니다.
-    앞뒤 공백은 제거하되(트림), 문장 중간 공백은 그대로 둡니다."""
+def plain_to_html(text: str) -> str:
+    """편집 화면에서 받은 순수 텍스트(줄바꿈 포함)를 안전한 HTML로 변환.
+    한 줄바꿈(\\n)은 <br/>로, 문단 사이 빈 줄은 호출하는 쪽에서 이미 별도 문단으로 나눠 넘겨줌."""
+    return escape_html(text).replace("\n", "<br/>")
+
+
+def get_paragraph_plain_text(para) -> str:
+    """워드 문단에서 순수 텍스트를 뽑아옵니다. Shift+Enter 줄바꿈은 \\n으로,
+    탭은 공백 하나로 바꾸고, 앞뒤 공백은 제거합니다."""
     parts = []
     for run in para.runs:
         for child in run._element:
             tag = child.tag.split("}")[-1]
             if tag == "t":
-                parts.append(escape_html(child.text or ""))
+                parts.append(child.text or "")
             elif tag == "br":
-                parts.append("<br/>")
+                parts.append("\n")
             elif tag == "tab":
-                parts.append(" ")  # 탭 문자는 공백 하나로 정리 (소제목에 탭이 그대로 남는 문제 방지)
-    html = "".join(parts)
-    # 문단 앞뒤의 공백만 제거 (예: 저자명 앞에 정렬용으로 넣은 스페이스 다수)
-    return html.strip()
+                parts.append(" ")
+    return "".join(parts).strip()
 
 
-def build_heading_tree(document: "docx.Document"):
+# ---------------------------------------------------------------------------
+# 1단계: 워드 -> 편집 가능한 구조(JSON)
+# ---------------------------------------------------------------------------
+
+def build_heading_tree(document: "docx.Document") -> dict:
     """
-    'Heading 1' ~ 'Heading 6'(제목 1~6) 스타일을 몇 단계든 자동으로 인식해 트리 구조를 만듭니다.
-    'Title' 스타일 문단은 진짜 책 제목으로, 그 외 Heading 이전에 나오는 문단(부제 등)은
-    표지 텍스트(root paras)로 취급합니다.
+    'Heading 1'~'Heading 6'(제목 1~6) 스타일을 자동으로 인식해 트리 구조를 만듭니다.
+    'Title' 스타일 문단은 표지 제목(root)에 포함시킵니다.
     """
     root = {"title_lines": [], "paras": [], "level": 0, "children": []}
     stack = [root]
 
     for para in document.paragraphs:
         style_name = (para.style.name or "").lower()
-        html = get_paragraph_html(para)
+        text = get_paragraph_plain_text(para)
 
         if style_name == "title":
-            if html:
-                root["title_lines"].append(html)
+            if text:
+                root["title_lines"].append(text)
             continue
 
         m = re.match(r"(?:heading|제목)\s*(\d+)", style_name)
         level = int(m.group(1)) if m else None
 
-        if level is not None and html:
+        if level is not None and text:
             while len(stack) > 1 and stack[-1]["level"] >= level:
                 stack.pop()
-            node = {"title": html, "level": level, "paras": [], "children": []}
+            node = {"title": text, "level": level, "paras": [], "children": []}
             stack[-1]["children"].append(node)
             stack.append(node)
         else:
-            if html:
-                css_class = "subtitle" if style_name == "subtitle" else None
-                stack[-1]["paras"].append({"html": html, "class": css_class})
+            if text:
+                stack[-1]["paras"].append(text)
 
     return root
 
 
-def build_epub(
-    docx_bytes: bytes,
-    title_override: str,
-    author: str,
-    publisher: str,
-    isbn: str,
-    language: str,
-    template_key: str,
-    epub_version: str,
-) -> bytes:
-    document = docx.Document(io.BytesIO(docx_bytes))
-    tree = build_heading_tree(document)
-    template = TEMPLATES.get(template_key, TEMPLATES["essay"])
+_id_counter = 0
 
-    # 진짜 제목 결정: 워드의 Title 스타일 문단이 있으면 그걸 우선 사용,
-    # 없을 경우에만 사용자가 입력한 title_override(선택 입력)를 사용
-    extracted_title = " ".join(tree["title_lines"]).strip()
-    book_title = extracted_title or title_override.strip() or "제목 없음"
-    book_author = author.strip() if author and author.strip() else "저자 미상"
+
+def _next_id() -> str:
+    global _id_counter
+    _id_counter += 1
+    return f"n_{_id_counter}"
+
+
+def tree_to_editable(node: dict, is_root: bool = False) -> dict:
+    """내부 트리 구조를 프론트엔드가 그대로 렌더링할 수 있는 JSON 구조로 변환."""
+    if is_root:
+        title = " ".join(node["title_lines"]).strip()
+        level = 0
+    else:
+        title = node["title"]
+        level = node["level"]
+
+    return {
+        "id": "root" if is_root else _next_id(),
+        "level": level,
+        "title": title,
+        "body": "\n\n".join(node["paras"]),   # 문단 사이는 빈 줄로 구분해 하나의 텍스트로 합침
+        "split": True if is_root else (level <= DEFAULT_SPLIT_LEVEL),
+        "children": [tree_to_editable(c) for c in node["children"]],
+    }
+
+
+@app.post("/parse")
+async def parse_docx(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="현재는 .docx 파일만 지원합니다.")
+
+    docx_bytes = await file.read()
+    try:
+        document = docx.Document(io.BytesIO(docx_bytes))
+        tree = build_heading_tree(document)
+        global _id_counter
+        _id_counter = 0
+        editable = tree_to_editable(tree, is_root=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"원고를 읽는 중 오류가 발생했습니다: {e}")
+
+    extracted_title = editable["title"]
+    return JSONResponse({
+        "extracted_title": extracted_title,
+        "root": editable,
+    })
+
+
+# ---------------------------------------------------------------------------
+# 2단계: 수정된 구조(JSON) -> 실제 EPUB
+# ---------------------------------------------------------------------------
+
+class EditableNode(BaseModel):
+    id: str
+    level: int
+    title: str
+    body: str = ""
+    split: bool
+    children: List["EditableNode"] = []
+
+
+EditableNode.model_rebuild()
+
+
+class BuildRequest(BaseModel):
+    root: EditableNode
+    book_title: str = ""
+    author: str = ""
+    publisher: str = ""
+    isbn: str = ""
+    template_key: str = "essay"
+    epub_version: str = "3"
+
+
+def render_body_html(body_text: str) -> str:
+    """편집 화면에서 받은 본문(빈 줄로 문단 구분)을 <p> 태그들로 변환."""
+    if not body_text.strip():
+        return ""
+    paragraphs = [p for p in body_text.split("\n\n") if p.strip()]
+    return "\n".join(f"<p>{plain_to_html(p.strip())}</p>" for p in paragraphs)
+
+
+def build_epub_from_structure(req: BuildRequest) -> bytes:
+    template = TEMPLATES.get(req.template_key, TEMPLATES["essay"])
+    book_title = (req.book_title or req.root.title or "제목 없음").strip()
+    book_author = req.author.strip() if req.author.strip() else "저자 미상"
 
     book = epub.EpubBook()
-    book.set_identifier(isbn if isbn else str(uuid.uuid4()))
+    book.set_identifier(req.isbn if req.isbn else str(uuid.uuid4()))
     book.set_title(book_title)
-    book.set_language(language or "ko")
+    book.set_language("ko")
     book.add_author(book_author)
-    if publisher:
-        book.add_metadata("DC", "publisher", publisher)
+    if req.publisher.strip():
+        book.add_metadata("DC", "publisher", req.publisher.strip())
 
     style_item = epub.EpubItem(
         uid="style_default",
@@ -169,96 +242,55 @@ def build_epub(
     all_chapters_flat = []
     counter = 0
 
-    def render_paras(paras) -> str:
-        out = []
-        for p in paras:
-            cls = f' class="{p["class"]}"' if p.get("class") else ""
-            out.append(f'<p{cls}>{p["html"]}</p>')
-        return "\n".join(out)
-
-    def make_chapter(chap_title: str, paras: list) -> "epub.EpubHtml":
+    def make_chapter(title: str, body_text: str) -> "epub.EpubHtml":
         nonlocal counter
         counter += 1
         file_name = f"chap_{counter:03d}.xhtml"
-        body_html = f"<h1>{escape_html(chap_title)}</h1>\n" if chap_title else ""
-        body_html += render_paras(paras)
-        c = epub.EpubHtml(title=chap_title or f"챕터 {counter}", file_name=file_name, lang=language or "ko")
+        body_html = f"<h1>{escape_html(title)}</h1>\n" if title else ""
+        body_html += render_body_html(body_text)
+        c = epub.EpubHtml(title=title or f"챕터 {counter}", file_name=file_name, lang="ko")
         c.content = f"<html><head></head><body>{body_html}</body></html>"
         c.add_item(style_item)
         book.add_item(c)
         all_chapters_flat.append(c)
         return c
 
-    def append_anchor_to_chapter(chapter, node) -> str:
-        """새 파일을 만들지 않고, 기존 챕터 파일 끝에 소제목(h3~h6)+본문을 이어붙입니다."""
+    def append_anchor(chapter, node: EditableNode) -> str:
         anchor_id = f"sec_{uuid.uuid4().hex[:8]}"
-        heading_tag = f"h{min(node['level'] + 1, 6)}"  # 챕터 h1 다음 레벨이므로 +1
-        anchor_html = f'<{heading_tag} id="{anchor_id}">{escape_html(node["title"])}</{heading_tag}>\n'
-        anchor_html += render_paras(node["paras"])
-        chapter.content = chapter.content.replace("</body>", anchor_html + "\n</body>")
+        heading_tag = f"h{min(max(node.level, 2) + 1, 6)}"
+        html = f'<{heading_tag} id="{anchor_id}">{escape_html(node.title)}</{heading_tag}>\n'
+        html += render_body_html(node.body)
+        chapter.content = chapter.content.replace("</body>", html + "\n</body>")
         return anchor_id
 
-    def process_node(node):
-        """
-        반환값: (toc_entry, 사용된_챕터파일)
-        toc_entry는 epub.Link, epub.EpubHtml, 또는 (Section, tuple) 형태입니다.
-        """
-        if node["level"] <= MAX_SPLIT_LEVEL:
-            chap = make_chapter(node["title"], node["paras"])
+    def walk(node: EditableNode, current_chapter):
+        """current_chapter=None이면 반드시 새 챕터를 만들어야 하는 상황(=root 또는 split=True)."""
+        toc_entry = None
+        if current_chapter is None or node.split:
+            chap = make_chapter(node.title, node.body)
             child_entries = []
-            for child in node["children"]:
-                entry, _ = process_node_in_chapter(child, chap)
-                child_entries.append(entry)
-            if child_entries:
-                return (epub.Section(node["title"], href=chap.file_name), tuple(child_entries)), chap
-            return chap, chap
+            for child in node.children:
+                entry = walk(child, chap)
+                if entry is not None:
+                    child_entries.append(entry)
+            toc_entry = (epub.Section(node.title, href=chap.file_name), tuple(child_entries)) if child_entries else chap
         else:
-            # 이론상 여기 도달하면 최상위 노드가 MAX_SPLIT_LEVEL보다 깊은 경우인데,
-            # 실제로는 process_node_in_chapter 쪽에서 처리되므로 안전장치로만 둡니다.
-            return process_node_in_chapter(node, all_chapters_flat[-1] if all_chapters_flat else None)
-
-    def process_node_in_chapter(node, current_chapter):
-        """MAX_SPLIT_LEVEL을 넘는 소제목을 현재 챕터 파일 안에 앵커로 삽입."""
-        if node["level"] <= MAX_SPLIT_LEVEL:
-            # 혹시 트리 구조상 다시 상위 레벨이 나오면 새 챕터로 분리
-            chap = make_chapter(node["title"], node["paras"])
+            anchor_id = append_anchor(current_chapter, node)
+            link = epub.Link(f"{current_chapter.file_name}#{anchor_id}", node.title, anchor_id)
             child_entries = []
-            for child in node["children"]:
-                entry, _ = process_node_in_chapter(child, chap)
-                child_entries.append(entry)
-            if child_entries:
-                return (epub.Section(node["title"], href=chap.file_name), tuple(child_entries)), chap
-            return chap, chap
+            for child in node.children:
+                entry = walk(child, current_chapter)
+                if entry is not None:
+                    child_entries.append(entry)
+            toc_entry = (link, tuple(child_entries)) if child_entries else link
+        return toc_entry
 
-        anchor_id = append_anchor_to_chapter(current_chapter, node)
-        link = epub.Link(f"{current_chapter.file_name}#{anchor_id}", node["title"], anchor_id)
-        child_entries = []
-        for child in node["children"]:
-            entry, _ = process_node_in_chapter(child, current_chapter)
-            child_entries.append(entry)
-        if child_entries:
-            return (link, tuple(child_entries)), current_chapter
-        return link, current_chapter
-
-    toc_entries = []
-
-    # 표지(제목) 챕터: 항상 1번 챕터로 생성. 부제/저자명 등은 이 챕터의 본문으로 들어감.
-    intro_chap = make_chapter(book_title, tree["paras"])
-    toc_entries.append(intro_chap)
-
-    for child in tree["children"]:
-        entry, _ = process_node(child)
-        toc_entries.append(entry)
-
+    toc_entries = [walk(req.root, None)]
     book.toc = tuple(toc_entries)
 
-    # --- EPUB 2.0 / 3.0 분기 ---
-    # ebooklib은 호환성을 위해 기본적으로 NCX(2.0 표준 목차)를 항상 생성합니다.
-    # nav.xhtml(EPUB3 표준 목차)은 3.0을 선택했을 때만 추가합니다.
     book.add_item(epub.EpubNcx())
-    if epub_version == "3":
+    if req.epub_version == "3":
         book.add_item(epub.EpubNav())
-        # 목차(nav)는 "제목 다음"에 오도록 표지 챕터 바로 뒤에 배치 (맨 앞 X)
         book.spine = [all_chapters_flat[0], "nav"] + all_chapters_flat[1:]
     else:
         book.spine = list(all_chapters_flat)
@@ -269,6 +301,33 @@ def build_epub(
     return out.read()
 
 
+@app.post("/build")
+async def build(req: BuildRequest):
+    try:
+        epub_bytes = build_epub_from_structure(req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"EPUB 생성 중 오류가 발생했습니다: {e}")
+
+    from urllib.parse import quote
+    base_name = req.book_title.strip() or "output"
+    safe_title = re.sub(r"[^\w\-가-힣]", "_", base_name) or "output"
+    encoded_name = quote(f"{safe_title}.epub")
+    return StreamingResponse(
+        io.BytesIO(epub_bytes),
+        media_type="application/epub+zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="book.epub"; '
+                f"filename*=UTF-8''{encoded_name}"
+            )
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# 화면 (업로드 -> 미리보기/수정 -> 다운로드, 전부 한 페이지에서 JS로 처리)
+# ---------------------------------------------------------------------------
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     options_html = "".join(
@@ -276,174 +335,279 @@ async def index():
         for key, val in TEMPLATES.items()
     )
     return f"""
-    <!DOCTYPE html>
-    <html lang="ko">
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>다온 EPUB 변환기 (웹)</title>
-    <style>
-      body {{ font-family: 'Pretendard', -apple-system, sans-serif; background:#101423; color:#F5F9FF; max-width:640px; margin:60px auto; padding:0 20px; }}
-      h1 {{ font-size:24px; margin-bottom:8px; }}
-      .notice {{ background:rgba(79,182,198,0.12); border:1px solid rgba(79,182,198,0.4); padding:12px 16px; border-radius:6px; font-size:13px; margin-bottom:28px; }}
-      label {{ display:block; margin-top:16px; font-size:14px; color:#B9C3D9; }}
-      input, select {{ width:100%; padding:10px; margin-top:6px; border-radius:4px; border:1px solid #333; background:#181D2E; color:#fff; box-sizing:border-box; }}
-      button {{ margin-top:28px; width:100%; padding:14px; background:#4C8DFF; border:none; border-radius:4px; color:#fff; font-size:15px; font-weight:600; cursor:pointer; }}
-      button:hover {{ background:#6C93EF; }}
-      button:disabled {{ opacity:0.6; cursor:not-allowed; }}
-      .hint {{ font-size:12px; color:#7C8AA8; margin-top:4px; }}
-      #status {{ margin-top:14px; font-size:13px; color:#B9C3D9; min-height:18px; }}
-    </style>
-    </head>
-    <body>
-      <h1>다온 EPUB 변환기 (웹)</h1>
-      <div class="notice">현재는 워드(.docx) 파일만 지원합니다. 한글(HWP) 파일 지원은 준비 중입니다.</div>
-      <form id="convertForm">
-        <label>원고 파일 (.docx)</label>
-        <input type="file" name="file" accept=".docx" required>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>다온 EPUB 변환기 (웹)</title>
+<style>
+  body {{ font-family: 'Pretendard', -apple-system, sans-serif; background:#101423; color:#F5F9FF; max-width:720px; margin:40px auto; padding:0 20px 60px; }}
+  h1 {{ font-size:24px; margin-bottom:8px; }}
+  .notice {{ background:rgba(79,182,198,0.12); border:1px solid rgba(79,182,198,0.4); padding:12px 16px; border-radius:6px; font-size:13px; margin-bottom:24px; }}
+  label {{ display:block; margin-top:14px; font-size:13px; color:#B9C3D9; }}
+  input[type=text], input[type=file], select, textarea {{
+    width:100%; padding:9px 10px; margin-top:5px; border-radius:4px; border:1px solid #333;
+    background:#181D2E; color:#fff; box-sizing:border-box; font-family:inherit; font-size:14px;
+  }}
+  textarea {{ min-height:70px; resize:vertical; line-height:1.6; }}
+  button {{ margin-top:20px; padding:12px 18px; background:#4C8DFF; border:none; border-radius:4px; color:#fff; font-size:14px; font-weight:600; cursor:pointer; }}
+  button:hover {{ background:#6C93EF; }}
+  button:disabled {{ opacity:0.5; cursor:not-allowed; }}
+  button.secondary {{ background:#2A3350; }}
+  button.secondary:hover {{ background:#37426A; }}
+  #status {{ margin-top:12px; font-size:13px; color:#B9C3D9; min-height:18px; }}
+  #uploadSection, #editSection {{ margin-top:24px; }}
+  #editSection {{ display:none; }}
+  .node {{ border-left:2px solid #2A3350; padding-left:14px; margin-top:16px; }}
+  .node-head {{ display:flex; align-items:center; gap:10px; }}
+  .node-head input[type=text] {{ margin-top:0; font-weight:600; }}
+  .node-level-tag {{ font-size:11px; color:#7C8AA8; white-space:nowrap; }}
+  .split-toggle {{ display:flex; align-items:center; gap:6px; font-size:12px; color:#B9C3D9; white-space:nowrap; }}
+  .split-toggle input {{ width:auto; margin:0; }}
+  .meta-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }}
+  hr.sep {{ border:none; border-top:1px solid #262c42; margin:26px 0; }}
+</style>
+</head>
+<body>
+  <h1>다온 EPUB 변환기 (웹)</h1>
+  <div class="notice">현재는 워드(.docx) 파일만 지원합니다. 변환 전에 제목/장 제목/본문/페이지 분리 여부를 직접 확인하고 수정할 수 있습니다.</div>
 
-        <label>제목 <span class="hint">(비워두면 원고의 "Title" 스타일 문단을 자동으로 사용합니다)</span></label>
-        <input type="text" name="title">
+  <div id="uploadSection">
+    <label>원고 파일 (.docx)</label>
+    <input type="file" id="fileInput" accept=".docx">
+    <button id="parseBtn">원고 불러오기 (수정 화면으로 이동)</button>
+    <div id="uploadStatus" style="margin-top:10px; font-size:13px; color:#B9C3D9;"></div>
+  </div>
 
+  <div id="editSection">
+    <hr class="sep">
+    <div class="meta-grid">
+      <div>
+        <label>책 제목</label>
+        <input type="text" id="bookTitle">
+      </div>
+      <div>
         <label>저자</label>
-        <input type="text" name="author">
-
+        <input type="text" id="bookAuthor">
+      </div>
+      <div>
         <label>출판사</label>
-        <input type="text" name="publisher">
-
+        <input type="text" id="bookPublisher">
+      </div>
+      <div>
         <label>ISBN (선택)</label>
-        <input type="text" name="isbn">
-
+        <input type="text" id="bookIsbn">
+      </div>
+      <div>
         <label>디자인 템플릿</label>
-        <select name="template_key">{options_html}</select>
-
+        <select id="templateKey">{options_html}</select>
+      </div>
+      <div>
         <label>EPUB 버전</label>
-        <select name="epub_version">
+        <select id="epubVersion">
           <option value="3">EPUB 3.0 (권장)</option>
           <option value="2">EPUB 2.0</option>
         </select>
+      </div>
+    </div>
 
-        <button type="submit" id="submitBtn">EPUB으로 변환하기</button>
-        <div id="status"></div>
-      </form>
+    <hr class="sep">
+    <div id="chapterTree"></div>
 
-      <script>
-        const form = document.getElementById('convertForm');
-        const btn = document.getElementById('submitBtn');
-        const status = document.getElementById('status');
+    <button id="buildBtn">최종 EPUB 만들어서 다운로드</button>
+    <button class="secondary" id="backBtn" type="button">다른 파일 다시 불러오기</button>
+    <div id="status"></div>
+  </div>
 
-        form.addEventListener('submit', async (e) => {{
-          e.preventDefault();
-          btn.disabled = true;
-          status.textContent = '변환 중입니다...';
+<script>
+let rootData = null;
 
-          const formData = new FormData(form);
+function nodeLabel(level) {{
+  if (level === 0) return '표지';
+  return '레벨 ' + level;
+}}
 
-          try {{
-            const res = await fetch('/convert', {{ method: 'POST', body: formData }});
-            if (!res.ok) {{
-              const err = await res.json().catch(() => ({{}}));
-              throw new Error(err.detail || '변환 중 오류가 발생했습니다.');
-            }}
-            const blob = await res.blob();
+function renderNode(node, container) {{
+  const wrap = document.createElement('div');
+  wrap.className = 'node';
+  wrap.dataset.nodeId = node.id;
 
-            // 파일명 추출 (서버가 내려준 Content-Disposition 참고, 실패 시 기본값)
-            const disposition = res.headers.get('Content-Disposition') || '';
-            const match = disposition.match(/filename\\*=UTF-8''([^;]+)/);
-            const suggestedName = match ? decodeURIComponent(match[1]) : 'book.epub';
+  const head = document.createElement('div');
+  head.className = 'node-head';
 
-            // 저장 위치 선택 (크롬/엣지 등 지원 브라우저)
-            if (window.showSaveFilePicker) {{
-              try {{
-                const handle = await window.showSaveFilePicker({{
-                  suggestedName,
-                  types: [{{ description: 'EPUB 파일', accept: {{ 'application/epub+zip': ['.epub'] }} }}],
-                }});
-                const writable = await handle.createWritable();
-                await writable.write(blob);
-                await writable.close();
-                status.textContent = '저장 완료!';
-              }} catch (pickerErr) {{
-                if (pickerErr.name === 'AbortError') {{
-                  status.textContent = '저장이 취소되었습니다.';
-                }} else {{
-                  throw pickerErr;
-                }}
-              }}
-            }} else {{
-              // 저장 위치 선택 미지원 브라우저(사파리/파이어폭스 등) -> 기본 다운로드 폴더로 저장
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = suggestedName;
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-              URL.revokeObjectURL(url);
-              status.textContent = '다운로드 폴더에 저장되었습니다.';
-            }}
-          }} catch (err) {{
-            status.textContent = '오류: ' + err.message;
-          }} finally {{
-            btn.disabled = false;
-          }}
+  const tag = document.createElement('span');
+  tag.className = 'node-level-tag';
+  tag.textContent = nodeLabel(node.level);
+  head.appendChild(tag);
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.value = node.title;
+  titleInput.dataset.field = 'title';
+  head.appendChild(titleInput);
+
+  if (node.level > 0) {{
+    const toggleWrap = document.createElement('label');
+    toggleWrap.className = 'split-toggle';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = node.split;
+    cb.dataset.field = 'split';
+    toggleWrap.appendChild(cb);
+    toggleWrap.appendChild(document.createTextNode('새 페이지로 분리'));
+    head.appendChild(toggleWrap);
+  }}
+
+  wrap.appendChild(head);
+
+  const body = document.createElement('textarea');
+  body.value = node.body || '';
+  body.dataset.field = 'body';
+  body.placeholder = '본문 내용 (문단 사이는 빈 줄로 구분됩니다)';
+  wrap.appendChild(body);
+
+  container.appendChild(wrap);
+
+  const childrenWrap = document.createElement('div');
+  wrap.appendChild(childrenWrap);
+  (node.children || []).forEach(child => renderNode(child, childrenWrap));
+}}
+
+function collectNode(el) {{
+  const id = el.dataset.nodeId;
+  const titleInput = el.querySelector(':scope > .node-head input[data-field="title"]');
+  const splitInput = el.querySelector(':scope > .node-head input[data-field="split"]');
+  const bodyInput = el.querySelector(':scope > textarea[data-field="body"]');
+  const childrenWrap = el.querySelector(':scope > div:last-child');
+  const children = [];
+  if (childrenWrap) {{
+    childrenWrap.querySelectorAll(':scope > .node').forEach(childEl => {{
+      children.push(collectNode(childEl));
+    }});
+  }}
+  return {{
+    id: id,
+    level: parseInt(el.querySelector('.node-level-tag').textContent === '표지' ? '0' : el.querySelector('.node-level-tag').textContent.replace('레벨 ', ''), 10),
+    title: titleInput ? titleInput.value : '',
+    body: bodyInput ? bodyInput.value : '',
+    split: splitInput ? splitInput.checked : true,
+    children: children,
+  }};
+}}
+
+document.getElementById('parseBtn').addEventListener('click', async () => {{
+  const fileInput = document.getElementById('fileInput');
+  const uploadStatus = document.getElementById('uploadStatus');
+  if (!fileInput.files.length) {{
+    uploadStatus.textContent = '먼저 워드 파일을 선택해주세요.';
+    return;
+  }}
+  uploadStatus.textContent = '원고를 읽는 중입니다...';
+
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+
+  try {{
+    const res = await fetch('/parse', {{ method: 'POST', body: formData }});
+    if (!res.ok) {{
+      const err = await res.json().catch(() => ({{}}));
+      throw new Error(err.detail || '원고를 읽는 중 오류가 발생했습니다.');
+    }}
+    const data = await res.json();
+    rootData = data.root;
+
+    document.getElementById('bookTitle').value = data.extracted_title || '';
+    document.getElementById('chapterTree').innerHTML = '';
+    renderNode(rootData, document.getElementById('chapterTree'));
+
+    document.getElementById('uploadSection').style.display = 'none';
+    document.getElementById('editSection').style.display = 'block';
+    uploadStatus.textContent = '';
+  }} catch (err) {{
+    uploadStatus.textContent = '오류: ' + err.message;
+  }}
+}});
+
+document.getElementById('backBtn').addEventListener('click', () => {{
+  document.getElementById('editSection').style.display = 'none';
+  document.getElementById('uploadSection').style.display = 'block';
+  document.getElementById('fileInput').value = '';
+  document.getElementById('status').textContent = '';
+}});
+
+document.getElementById('buildBtn').addEventListener('click', async () => {{
+  const status = document.getElementById('status');
+  const buildBtn = document.getElementById('buildBtn');
+  buildBtn.disabled = true;
+  status.textContent = 'EPUB 생성 중입니다...';
+
+  const rootEl = document.querySelector('#chapterTree > .node');
+  const editedRoot = collectNode(rootEl);
+
+  const payload = {{
+    root: editedRoot,
+    book_title: document.getElementById('bookTitle').value,
+    author: document.getElementById('bookAuthor').value,
+    publisher: document.getElementById('bookPublisher').value,
+    isbn: document.getElementById('bookIsbn').value,
+    template_key: document.getElementById('templateKey').value,
+    epub_version: document.getElementById('epubVersion').value,
+  }};
+
+  try {{
+    const res = await fetch('/build', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload),
+    }});
+    if (!res.ok) {{
+      const err = await res.json().catch(() => ({{}}));
+      throw new Error(err.detail || 'EPUB 생성 중 오류가 발생했습니다.');
+    }}
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename\\*=UTF-8''([^;]+)/);
+    const suggestedName = match ? decodeURIComponent(match[1]) : 'book.epub';
+
+    if (window.showSaveFilePicker) {{
+      try {{
+        const handle = await window.showSaveFilePicker({{
+          suggestedName,
+          types: [{{ description: 'EPUB 파일', accept: {{ 'application/epub+zip': ['.epub'] }} }}],
         }});
-      </script>
-    </body>
-    </html>
-    """
-
-
-@app.post("/convert")
-async def convert(
-    file: UploadFile = File(...),
-    title: str = Form(""),
-    author: str = Form(""),
-    publisher: str = Form(""),
-    isbn: str = Form(""),
-    template_key: str = Form("essay"),
-    epub_version: str = Form("3"),
-):
-    if not file.filename.lower().endswith(".docx"):
-        raise HTTPException(status_code=400, detail="현재는 .docx 파일만 지원합니다.")
-
-    if epub_version not in ("2", "3"):
-        raise HTTPException(status_code=400, detail="epub_version은 '2' 또는 '3'만 지원합니다.")
-
-    docx_bytes = await file.read()
-
-    try:
-        epub_bytes = build_epub(
-            docx_bytes=docx_bytes,
-            title_override=title,
-            author=author,
-            publisher=publisher,
-            isbn=isbn,
-            language="ko",
-            template_key=template_key,
-            epub_version=epub_version,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"변환 중 오류가 발생했습니다: {e}")
-
-    from urllib.parse import quote
-
-    # 파일명은 실제 추출된 제목을 쓰기 어려우므로(스트리밍 이후 알 수 없음),
-    # 사용자가 입력한 title 또는 파일 원본 이름을 기준으로 안전하게 생성
-    base_name = title.strip() or Path(file.filename).stem
-    safe_title = re.sub(r"[^\w\-가-힣]", "_", base_name) or "output"
-    ascii_fallback = "book.epub"
-    encoded_name = quote(f"{safe_title}.epub")
-    return StreamingResponse(
-        io.BytesIO(epub_bytes),
-        media_type="application/epub+zip",
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="{ascii_fallback}"; '
-                f"filename*=UTF-8''{encoded_name}"
-            )
-        },
-    )
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        status.textContent = '저장 완료!';
+      }} catch (pickerErr) {{
+        if (pickerErr.name === 'AbortError') {{
+          status.textContent = '저장이 취소되었습니다.';
+        }} else {{
+          throw pickerErr;
+        }}
+      }}
+    }} else {{
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = suggestedName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      status.textContent = '다운로드 폴더에 저장되었습니다.';
+    }}
+  }} catch (err) {{
+    status.textContent = '오류: ' + err.message;
+  }} finally {{
+    buildBtn.disabled = false;
+  }}
+}});
+</script>
+</body>
+</html>
+"""
 
 
 @app.get("/health")
