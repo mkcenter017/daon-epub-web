@@ -342,81 +342,193 @@ async def index():
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>다온 EPUB 변환기 (웹)</title>
 <style>
-  body {{ font-family: 'Pretendard', -apple-system, sans-serif; background:#101423; color:#F5F9FF; max-width:720px; margin:40px auto; padding:0 20px 60px; }}
-  h1 {{ font-size:24px; margin-bottom:8px; }}
-  .notice {{ background:rgba(79,182,198,0.12); border:1px solid rgba(79,182,198,0.4); padding:12px 16px; border-radius:6px; font-size:13px; margin-bottom:24px; }}
-  label {{ display:block; margin-top:14px; font-size:13px; color:#B9C3D9; }}
-  input[type=text], input[type=file], select, textarea {{
-    width:100%; padding:9px 10px; margin-top:5px; border-radius:4px; border:1px solid #333;
-    background:#181D2E; color:#fff; box-sizing:border-box; font-family:inherit; font-size:14px;
+  :root {{
+    --bg:#0E1220; --panel:#161B2C; --panel2:#1D2338; --border:#2A3350;
+    --text:#F5F9FF; --sub:#8C97B8; --accent:#4C8DFF; --accent-soft:rgba(76,141,255,0.14);
+    --lv1:#4C8DFF; --lv2:#5EE6D9; --lv3:#F2C46D; --lv4:#F28D8D; --lv5:#C89BF2; --lv6:#8C97B8;
   }}
-  textarea {{ min-height:70px; resize:vertical; line-height:1.6; }}
-  button {{ margin-top:20px; padding:12px 18px; background:#4C8DFF; border:none; border-radius:4px; color:#fff; font-size:14px; font-weight:600; cursor:pointer; }}
-  button:hover {{ background:#6C93EF; }}
-  button:disabled {{ opacity:0.5; cursor:not-allowed; }}
-  button.secondary {{ background:#2A3350; }}
-  button.secondary:hover {{ background:#37426A; }}
-  #status {{ margin-top:12px; font-size:13px; color:#B9C3D9; min-height:18px; }}
-  #uploadSection, #editSection {{ margin-top:24px; }}
+  * {{ box-sizing:border-box; }}
+  body {{
+    font-family:'Pretendard', -apple-system, sans-serif; background:var(--bg); color:var(--text);
+    max-width:760px; margin:0 auto; padding:0 20px 80px;
+  }}
+  h1 {{ font-size:21px; margin:28px 0 4px; }}
+  .notice {{
+    background:var(--accent-soft); border:1px solid rgba(76,141,255,0.35); padding:11px 14px;
+    border-radius:8px; font-size:12.5px; color:#C7D6FF; margin-bottom:22px; line-height:1.5;
+  }}
+  label {{ display:block; font-size:12px; color:var(--sub); margin-bottom:5px; }}
+  input[type=text], input[type=file], select, textarea {{
+    width:100%; padding:9px 11px; border-radius:6px; border:1px solid var(--border);
+    background:var(--panel2); color:#fff; box-sizing:border-box; font-family:inherit; font-size:14px;
+    transition:border-color .15s ease;
+  }}
+  input[type=text]:focus, textarea:focus, select:focus {{ outline:none; border-color:var(--accent); }}
+  textarea {{ min-height:64px; resize:vertical; line-height:1.65; }}
+
+  button {{
+    padding:10px 16px; background:var(--accent); border:none; border-radius:7px; color:#fff;
+    font-size:13.5px; font-weight:600; cursor:pointer; transition:background .15s ease;
+  }}
+  button:hover {{ background:#6C9BFF; }}
+  button:disabled {{ opacity:0.45; cursor:not-allowed; }}
+  button.secondary {{ background:var(--panel2); border:1px solid var(--border); color:var(--sub); }}
+  button.secondary:hover {{ background:#242B45; color:#fff; }}
+  button.ghost {{
+    background:transparent; border:1px solid var(--border); color:var(--sub);
+    padding:5px 10px; font-size:11.5px; font-weight:500;
+  }}
+  button.ghost:hover {{ border-color:var(--accent); color:var(--accent); background:transparent; }}
+
+  #status {{ margin-top:10px; font-size:12.5px; color:var(--sub); min-height:16px; }}
+
+  /* --- 업로드 화면 --- */
+  #uploadSection {{
+    margin-top:8px; background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:22px;
+  }}
+  #uploadSection button {{ margin-top:14px; width:100%; padding:13px; font-size:14.5px; }}
+
+  /* --- 편집 화면 --- */
   #editSection {{ display:none; }}
-  .node {{ border-left:2px solid #2A3350; padding-left:14px; margin-top:16px; }}
-  .node-head {{ display:flex; align-items:center; gap:10px; }}
-  .node-head input[type=text] {{ margin-top:0; font-weight:600; }}
-  .node-level-tag {{ font-size:11px; color:#7C8AA8; white-space:nowrap; }}
-  .split-toggle {{ display:flex; align-items:center; gap:6px; font-size:12px; color:#B9C3D9; white-space:nowrap; }}
-  .split-toggle input {{ width:auto; margin:0; }}
-  .meta-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }}
-  hr.sep {{ border:none; border-top:1px solid #262c42; margin:26px 0; }}
+
+  .meta-card {{
+    background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px;
+    margin-top:18px;
+  }}
+  .meta-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }}
+  .meta-grid .full {{ grid-column:1 / -1; }}
+
+  .toolbar {{
+    position:sticky; top:0; z-index:10; background:rgba(14,18,32,0.92); backdrop-filter:blur(8px);
+    padding:14px 0 12px; margin-top:4px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+  }}
+  .toolbar .title {{ font-size:14px; font-weight:600; }}
+  .toolbar .count {{ font-size:12px; color:var(--sub); font-weight:400; }}
+  .toolbar-actions {{ display:flex; gap:8px; }}
+
+  .tree {{ margin-top:18px; }}
+
+  .node {{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    margin-top:10px; overflow:hidden;
+  }}
+  .node[data-level="0"] {{ border-left:4px solid var(--lv1); }}
+  .node[data-level="1"] {{ border-left:4px solid var(--lv1); }}
+  .node[data-level="2"] {{ border-left:4px solid var(--lv2); }}
+  .node[data-level="3"] {{ border-left:4px solid var(--lv3); }}
+  .node[data-level="4"] {{ border-left:4px solid var(--lv4); }}
+  .node[data-level="5"] {{ border-left:4px solid var(--lv5); }}
+  .node[data-level="6"] {{ border-left:4px solid var(--lv6); }}
+
+  .node-head {{
+    display:flex; align-items:center; gap:10px; padding:10px 12px; cursor:pointer;
+    user-select:none;
+  }}
+  .node-head:hover {{ background:rgba(255,255,255,0.02); }}
+
+  .caret {{
+    width:16px; height:16px; flex:none; color:var(--sub); transition:transform .15s ease;
+    display:flex; align-items:center; justify-content:center; font-size:11px;
+  }}
+  .node.collapsed > .node-head .caret {{ transform:rotate(-90deg); }}
+
+  .level-badge {{
+    flex:none; font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:20px;
+    white-space:nowrap; letter-spacing:0.02em;
+  }}
+  .node[data-level="0"] .level-badge {{ background:rgba(76,141,255,0.18); color:var(--lv1); }}
+  .node[data-level="1"] .level-badge {{ background:rgba(76,141,255,0.18); color:var(--lv1); }}
+  .node[data-level="2"] .level-badge {{ background:rgba(94,230,217,0.16); color:var(--lv2); }}
+  .node[data-level="3"] .level-badge {{ background:rgba(242,196,109,0.16); color:var(--lv3); }}
+  .node[data-level="4"] .level-badge {{ background:rgba(242,141,141,0.16); color:var(--lv4); }}
+  .node[data-level="5"] .level-badge {{ background:rgba(200,155,242,0.16); color:var(--lv5); }}
+  .node[data-level="6"] .level-badge {{ background:rgba(140,151,184,0.16); color:var(--lv6); }}
+
+  .node-head input[type=text] {{
+    flex:1 1 auto; min-width:0; background:transparent; border:1px solid transparent; padding:5px 7px;
+    font-size:14px; font-weight:600; border-radius:5px;
+  }}
+  .node[data-level="0"] > .node-head input[type=text] {{ font-size:15.5px; }}
+  .node-head input[type=text]:hover {{ border-color:var(--border); }}
+  .node-head input[type=text]:focus {{ border-color:var(--accent); background:var(--panel2); }}
+
+  .split-toggle {{
+    flex:none; display:flex; align-items:center; gap:5px; font-size:11px; color:var(--sub);
+    white-space:nowrap; padding:4px 8px; border-radius:20px; border:1px solid var(--border);
+  }}
+  .split-toggle.on {{ color:#9CFFEB; border-color:rgba(94,230,217,0.4); background:rgba(94,230,217,0.08); }}
+  .split-toggle input {{ width:auto; margin:0; accent-color:var(--lv2); }}
+
+  .node-body-wrap {{ padding:0 14px 14px 14px; }}
+  .node-body-wrap textarea {{ font-size:13.5px; }}
+  .node.collapsed .node-body-wrap, .node.collapsed .node-children {{ display:none; }}
+
+  .node-children {{ padding:0 10px 10px 10px; }}
+
+  hr.sep {{ border:none; border-top:1px solid var(--border); margin:26px 0; }}
+
+  .empty-hint {{ font-size:12px; color:var(--sub); padding:10px 4px; }}
 </style>
 </head>
 <body>
   <h1>다온 EPUB 변환기 (웹)</h1>
-  <div class="notice">현재는 워드(.docx) 파일만 지원합니다. 변환 전에 제목/장 제목/본문/페이지 분리 여부를 직접 확인하고 수정할 수 있습니다.</div>
+  <div class="notice">현재는 워드(.docx) 파일만 지원합니다. 변환 전에 제목ㆍ장 제목ㆍ본문ㆍ페이지 분리 여부를 직접 확인하고 수정할 수 있습니다.</div>
 
   <div id="uploadSection">
     <label>원고 파일 (.docx)</label>
     <input type="file" id="fileInput" accept=".docx">
     <button id="parseBtn">원고 불러오기 (수정 화면으로 이동)</button>
-    <div id="uploadStatus" style="margin-top:10px; font-size:13px; color:#B9C3D9;"></div>
+    <div id="uploadStatus" style="margin-top:10px; font-size:12.5px; color:var(--sub);"></div>
   </div>
 
   <div id="editSection">
-    <hr class="sep">
-    <div class="meta-grid">
-      <div>
-        <label>책 제목</label>
-        <input type="text" id="bookTitle">
-      </div>
-      <div>
-        <label>저자</label>
-        <input type="text" id="bookAuthor">
-      </div>
-      <div>
-        <label>출판사</label>
-        <input type="text" id="bookPublisher">
-      </div>
-      <div>
-        <label>ISBN (선택)</label>
-        <input type="text" id="bookIsbn">
-      </div>
-      <div>
-        <label>디자인 템플릿</label>
-        <select id="templateKey">{options_html}</select>
-      </div>
-      <div>
-        <label>EPUB 버전</label>
-        <select id="epubVersion">
-          <option value="3">EPUB 3.0 (권장)</option>
-          <option value="2">EPUB 2.0</option>
-        </select>
+    <div class="meta-card">
+      <div class="meta-grid">
+        <div>
+          <label>책 제목 <span style="color:#556">(메타데이터용, 본문과 별개)</span></label>
+          <input type="text" id="bookTitle">
+        </div>
+        <div>
+          <label>저자</label>
+          <input type="text" id="bookAuthor">
+        </div>
+        <div>
+          <label>출판사</label>
+          <input type="text" id="bookPublisher">
+        </div>
+        <div>
+          <label>ISBN (선택)</label>
+          <input type="text" id="bookIsbn">
+        </div>
+        <div>
+          <label>디자인 템플릿</label>
+          <select id="templateKey">{options_html}</select>
+        </div>
+        <div>
+          <label>EPUB 버전</label>
+          <select id="epubVersion">
+            <option value="3">EPUB 3.0 (권장)</option>
+            <option value="2">EPUB 2.0</option>
+          </select>
+        </div>
       </div>
     </div>
 
-    <hr class="sep">
-    <div id="chapterTree"></div>
+    <div class="toolbar">
+      <div class="title">본문 구조 <span class="count" id="nodeCount"></span></div>
+      <div class="toolbar-actions">
+        <button class="ghost" id="expandAllBtn" type="button">모두 펼치기</button>
+        <button class="ghost" id="collapseAllBtn" type="button">모두 접기</button>
+        <button id="buildBtn">최종 EPUB 만들어서 다운로드</button>
+      </div>
+    </div>
 
-    <button id="buildBtn">최종 EPUB 만들어서 다운로드</button>
-    <button class="secondary" id="backBtn" type="button">다른 파일 다시 불러오기</button>
+    <div class="tree" id="chapterTree"></div>
+
+    <hr class="sep">
+    <button class="secondary" id="backBtn" type="button">← 다른 파일 다시 불러오기</button>
     <div id="status"></div>
   </div>
 
@@ -425,61 +537,90 @@ let rootData = null;
 
 function nodeLabel(level) {{
   if (level === 0) return '표지';
+  if (level === 1) return '부';
+  if (level === 2) return '장';
   return '레벨 ' + level;
 }}
 
-function renderNode(node, container) {{
+function countNodes(node) {{
+  let n = 1;
+  (node.children || []).forEach(c => n += countNodes(c));
+  return n;
+}}
+
+function renderNode(node, container, depth) {{
   const wrap = document.createElement('div');
   wrap.className = 'node';
   wrap.dataset.nodeId = node.id;
+  wrap.dataset.level = node.level;
+  if (depth > 1) wrap.style.marginLeft = '14px';
 
   const head = document.createElement('div');
   head.className = 'node-head';
 
-  const tag = document.createElement('span');
-  tag.className = 'node-level-tag';
-  tag.textContent = nodeLabel(node.level);
-  head.appendChild(tag);
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  caret.textContent = '▼';
+  head.appendChild(caret);
+
+  const badge = document.createElement('span');
+  badge.className = 'level-badge';
+  badge.textContent = nodeLabel(node.level);
+  head.appendChild(badge);
 
   const titleInput = document.createElement('input');
   titleInput.type = 'text';
   titleInput.value = node.title;
   titleInput.dataset.field = 'title';
+  titleInput.placeholder = '제목 없음';
   head.appendChild(titleInput);
 
   if (node.level > 0) {{
     const toggleWrap = document.createElement('label');
-    toggleWrap.className = 'split-toggle';
+    toggleWrap.className = 'split-toggle' + (node.split ? ' on' : '');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = node.split;
     cb.dataset.field = 'split';
+    cb.addEventListener('change', () => {{
+      toggleWrap.classList.toggle('on', cb.checked);
+    }});
     toggleWrap.appendChild(cb);
-    toggleWrap.appendChild(document.createTextNode('새 페이지로 분리'));
+    toggleWrap.appendChild(document.createTextNode(node.split ? '새 페이지' : '같은 페이지 안 소제목'));
     head.appendChild(toggleWrap);
   }}
 
+  head.addEventListener('click', (e) => {{
+    if (e.target.tagName === 'INPUT') return;
+    wrap.classList.toggle('collapsed');
+  }});
+
   wrap.appendChild(head);
 
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'node-body-wrap';
   const body = document.createElement('textarea');
   body.value = node.body || '';
   body.dataset.field = 'body';
   body.placeholder = '본문 내용 (문단 사이는 빈 줄로 구분됩니다)';
-  wrap.appendChild(body);
-
-  container.appendChild(wrap);
+  bodyWrap.appendChild(body);
+  wrap.appendChild(bodyWrap);
 
   const childrenWrap = document.createElement('div');
+  childrenWrap.className = 'node-children';
   wrap.appendChild(childrenWrap);
-  (node.children || []).forEach(child => renderNode(child, childrenWrap));
+  (node.children || []).forEach(child => renderNode(child, childrenWrap, depth + 1));
+
+  container.appendChild(wrap);
 }}
 
 function collectNode(el) {{
   const id = el.dataset.nodeId;
+  const level = parseInt(el.dataset.level, 10);
   const titleInput = el.querySelector(':scope > .node-head input[data-field="title"]');
   const splitInput = el.querySelector(':scope > .node-head input[data-field="split"]');
-  const bodyInput = el.querySelector(':scope > textarea[data-field="body"]');
-  const childrenWrap = el.querySelector(':scope > div:last-child');
+  const bodyInput = el.querySelector(':scope > .node-body-wrap textarea[data-field="body"]');
+  const childrenWrap = el.querySelector(':scope > .node-children');
   const children = [];
   if (childrenWrap) {{
     childrenWrap.querySelectorAll(':scope > .node').forEach(childEl => {{
@@ -488,7 +629,7 @@ function collectNode(el) {{
   }}
   return {{
     id: id,
-    level: parseInt(el.querySelector('.node-level-tag').textContent === '표지' ? '0' : el.querySelector('.node-level-tag').textContent.replace('레벨 ', ''), 10),
+    level: level,
     title: titleInput ? titleInput.value : '',
     body: bodyInput ? bodyInput.value : '',
     split: splitInput ? splitInput.checked : true,
@@ -518,8 +659,12 @@ document.getElementById('parseBtn').addEventListener('click', async () => {{
     rootData = data.root;
 
     document.getElementById('bookTitle').value = data.extracted_title || '';
-    document.getElementById('chapterTree').innerHTML = '';
-    renderNode(rootData, document.getElementById('chapterTree'));
+    const treeEl = document.getElementById('chapterTree');
+    treeEl.innerHTML = '';
+    renderNode(rootData, treeEl, 1);
+
+    const total = countNodes(rootData);
+    document.getElementById('nodeCount').textContent = '(총 ' + total + '개 항목)';
 
     document.getElementById('uploadSection').style.display = 'none';
     document.getElementById('editSection').style.display = 'block';
@@ -534,6 +679,15 @@ document.getElementById('backBtn').addEventListener('click', () => {{
   document.getElementById('uploadSection').style.display = 'block';
   document.getElementById('fileInput').value = '';
   document.getElementById('status').textContent = '';
+}});
+
+document.getElementById('expandAllBtn').addEventListener('click', () => {{
+  document.querySelectorAll('#chapterTree .node').forEach(el => el.classList.remove('collapsed'));
+}});
+document.getElementById('collapseAllBtn').addEventListener('click', () => {{
+  document.querySelectorAll('#chapterTree .node[data-level]').forEach(el => {{
+    if (el.dataset.level !== '0') el.classList.add('collapsed');
+  }});
 }});
 
 document.getElementById('buildBtn').addEventListener('click', async () => {{
@@ -608,6 +762,7 @@ document.getElementById('buildBtn').addEventListener('click', async () => {{
 </body>
 </html>
 """
+
 
 
 @app.get("/health")
