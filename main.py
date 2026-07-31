@@ -408,7 +408,12 @@ async def index():
   }}
   .toolbar .title {{ font-size:14px; font-weight:600; }}
   .toolbar .count {{ font-size:12px; color:var(--sub); font-weight:400; }}
-  .toolbar-actions {{ display:flex; gap:8px; }}
+  .toolbar-actions {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+  .bulk-split {{
+    display:flex; align-items:center; gap:6px; font-size:12px; color:var(--sub);
+    background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:5px 10px 5px 12px;
+  }}
+  .bulk-split select {{ width:auto; padding:4px 6px; font-size:12px; }}
 
   .layout {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; margin-top:4px; }}
   @media (max-width:920px) {{ .layout {{ grid-template-columns:1fr; }} }}
@@ -519,6 +524,12 @@ async def index():
   .node-body-wrap textarea {{ font-size:13.5px; }}
   .node.collapsed .node-body-wrap, .node.collapsed .node-children {{ display:none; }}
 
+  @keyframes flashHighlight {{
+    0% {{ box-shadow:0 0 0 3px var(--accent); }}
+    100% {{ box-shadow:0 0 0 0 transparent; }}
+  }}
+  .node.flash-highlight {{ animation:flashHighlight 1.1s ease-out; }}
+
   .node-children {{ padding:0 10px 10px 10px; }}
 
   hr.sep {{ border:none; border-top:1px solid var(--border); margin:26px 0; }}
@@ -573,6 +584,19 @@ async def index():
     <div class="toolbar">
       <div class="title">본문 구조 <span class="count" id="nodeCount"></span></div>
       <div class="toolbar-actions">
+        <span class="bulk-split">
+          <label style="margin:0; white-space:nowrap;">레벨</label>
+          <select id="bulkSplitLevel" style="width:60px; padding:6px 8px;">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+          </select>
+          <label style="margin:0; white-space:nowrap;">까지 새 파일로</label>
+          <button class="ghost" id="applyBulkSplitBtn" type="button">일괄 적용</button>
+        </span>
         <button class="ghost" id="expandAllBtn" type="button">모두 펼치기</button>
         <button class="ghost" id="collapseAllBtn" type="button">모두 접기</button>
         <button id="buildBtn">최종 EPUB 만들어서 다운로드</button>
@@ -589,7 +613,7 @@ async def index():
       <div class="preview-col">
         <div class="preview-head">
           <div>파일 구성 한눈에 보기</div>
-          <div class="preview-sub">굵은 글씨 = 새 파일, 흐리고 들여쓰기된 글씨 = 같은 파일 안 소제목. <span id="fileCountNote"></span><br>항목을 클릭하면 아래에 실제 페이지 모습이 보입니다.</div>
+          <div class="preview-sub">굵은 글씨 = 새 파일, 흐리고 들여쓰기된 글씨 = 같은 파일 안 소제목. <span id="fileCountNote"></span><br>항목을 클릭하면 왼쪽에서 그 부분만 펼쳐지며 이동하고, 아래에 실제 페이지 모습도 보입니다.</div>
         </div>
         <div class="outline-box" id="outlineList">
           <div class="empty-preview">원고를 불러오면 여기에 파일 구성이 표시됩니다.</div>
@@ -730,6 +754,34 @@ function renderBodyHtmlJs(bodyText) {{
 let selectedFileIndex = null;
 
 /**
+ * 목차에서 항목을 클릭했을 때, 왼쪽 편집 트리에서 그 항목만 눈에 띄게 만듭니다.
+ * 트리 구조 자체를 새로 그리지 않고, 기존에 있는 "접기/펼치기" 기능을 활용합니다:
+ * 1) 모든 항목을 일단 접고
+ * 2) 클릭한 항목까지 이어지는 경로만 펼치고
+ * 3) 그 항목으로 스크롤 이동 + 잠깐 테두리를 반짝여서 위치를 알려줍니다.
+ * 이렇게 하면 다른 항목들은 제목 줄만 남기고 접혀서, "그 파일에 해당하는 내용만
+ * 보인다"는 느낌을 그대로 살리면서도 편집 데이터 구조는 그대로 유지할 수 있습니다.
+ */
+function focusOnNode(nodeId) {{
+  document.querySelectorAll('#chapterTree .node[data-level]').forEach(el => {{
+    if (el.dataset.level !== '0') el.classList.add('collapsed');
+  }});
+  const target = document.querySelector('#chapterTree .node[data-node-id="' + nodeId + '"]');
+  if (!target) return;
+
+  let el = target;
+  while (el) {{
+    el.classList.remove('collapsed');
+    el = el.parentElement ? el.parentElement.closest('.node') : null;
+  }}
+
+  target.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+  target.classList.remove('flash-highlight');
+  void target.offsetWidth;
+  target.classList.add('flash-highlight');
+}}
+
+/**
  * node 트리를 순회하며 "실제로 새 파일이 되는 노드"만 pages 배열에 담고,
  * 동시에 화면에 뿌릴 목차 항목(outline)도 함께 만듭니다.
  * split=false인 노드는 새 파일을 만들지 않고, 가장 가까운 상위 파일의
@@ -743,7 +795,7 @@ function buildPreviewData(node, pages, outline, parentPageIdx) {{
     page.html += renderBodyHtmlJs(node.body);
     pages.push(page);
     pageIdx = pages.length - 1;
-    outline.push({{ type: 'file', title: node.title || '(제목 없음)', pageIdx: pageIdx }});
+    outline.push({{ type: 'file', title: node.title || '(제목 없음)', pageIdx: pageIdx, id: node.id }});
   }} else {{
     const page = pages[pageIdx];
     const tag = 'h' + Math.min(Math.max(node.level, 2) + 1, 6);
@@ -753,7 +805,7 @@ function buildPreviewData(node, pages, outline, parentPageIdx) {{
     page.html += '<' + tag + ' style="margin:0 0 6px;">' + escapeHtmlJs(node.title) + '</' + tag + '>\\n';
     page.html += renderBodyHtmlJs(node.body);
     page.html += '</div>';
-    outline.push({{ type: 'sub', title: node.title || '(제목 없음)', pageIdx: pageIdx }});
+    outline.push({{ type: 'sub', title: node.title || '(제목 없음)', pageIdx: pageIdx, id: node.id }});
   }}
   (node.children || []).forEach(child => buildPreviewData(child, pages, outline, pageIdx));
   return {{ pages, outline }};
@@ -830,6 +882,7 @@ function renderPreview() {{
       }}
       row.addEventListener('click', () => {{
         selectedFileIndex = entry.pageIdx;
+        focusOnNode(entry.id);
         renderPreview();
       }});
       outlineBox.appendChild(row);
@@ -897,6 +950,25 @@ document.getElementById('backBtn').addEventListener('click', () => {{
 }});
 
 document.getElementById('templateKey').addEventListener('change', renderPreview);
+
+document.getElementById('applyBulkSplitBtn').addEventListener('click', () => {{
+  const threshold = parseInt(document.getElementById('bulkSplitLevel').value, 10);
+  document.querySelectorAll('#chapterTree .node[data-level]').forEach(el => {{
+    const level = parseInt(el.dataset.level, 10);
+    if (level === 0) return; // 표지는 항상 새 파일이라 체크박스가 없음
+    const cb = el.querySelector(':scope > .node-head input[data-field="split"]');
+    if (!cb) return;
+    const shouldSplit = level <= threshold;
+    cb.checked = shouldSplit;
+    const toggleWrap = cb.closest('.split-toggle');
+    if (toggleWrap) {{
+      toggleWrap.classList.toggle('on', shouldSplit);
+      const textNode = Array.from(toggleWrap.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+      if (textNode) textNode.textContent = shouldSplit ? '새 페이지' : '같은 페이지 안 소제목';
+    }}
+  }});
+  schedulePreview();
+}});
 
 document.getElementById('expandAllBtn').addEventListener('click', () => {{
   document.querySelectorAll('#chapterTree .node').forEach(el => el.classList.remove('collapsed'));
