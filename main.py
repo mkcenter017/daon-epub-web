@@ -232,6 +232,10 @@ async def index():
       body {{ font-family: 'Pretendard', -apple-system, sans-serif; background:#101423; color:#F5F9FF; max-width:560px; margin:60px auto; padding:0 20px; }}
       h1 {{ font-size:22px; margin-bottom:8px; }}
       .notice {{ background:rgba(79,182,198,0.12); border:1px solid rgba(79,182,198,0.4); padding:12px 16px; border-radius:6px; font-size:13px; margin-bottom:26px; line-height:1.5; }}
+      .notice-guide {{ background:#181D2E; border-color:#333; margin-top:-12px; }}
+      .notice-guide strong {{ display:block; margin-bottom:8px; font-size:13.5px; }}
+      .notice-guide ul {{ margin:0 0 8px; padding-left:18px; }}
+      .notice-guide li {{ margin-bottom:4px; }}
       label {{ display:block; margin-top:16px; font-size:13px; color:#B9C3D9; }}
       input, select {{ width:100%; padding:10px; margin-top:6px; border-radius:4px; border:1px solid #333; background:#181D2E; color:#fff; box-sizing:border-box; }}
       button {{ margin-top:26px; width:100%; padding:14px; background:#4C8DFF; border:none; border-radius:4px; color:#fff; font-size:15px; font-weight:600; cursor:pointer; }}
@@ -245,6 +249,17 @@ async def index():
       <div class="notice">
         현재는 워드(.docx) 파일만 지원합니다.<br>
         제목·저자·챕터 분리는 자동으로 처리됩니다. 아래 칸은 비워둬도 괜찮습니다.
+      </div>
+      <div class="notice notice-guide">
+        <strong>변환 전 워드 파일을 이렇게 써주세요</strong>
+        <ul>
+          <li>책 제목: 워드 상단 홈 탭 → 스타일에서 <b>제목</b> 선택</li>
+          <li>부/장 제목: <b>제목 1</b> (예: "제1부"), <b>제목 2</b> (예: "1장")</li>
+          <li>소제목: <b>제목 3</b> 이상 (예: "1. 에피소드")</li>
+          <li>본문: <b>기본(표준)</b> 스타일 그대로 사용</li>
+        </ul>
+        스타일을 지정하지 않고 글자 크기·굵기만 바꾼 텍스트는 제목으로 인식되지 않아,
+        본문과 구분 없이 하나로 합쳐질 수 있습니다.
       </div>
       <form id="convertForm">
         <label>원고 파일 (.docx)</label>
@@ -267,7 +282,7 @@ async def index():
 
         <label>EPUB 버전</label>
         <select name="epub_version">
-          <option value="3">EPUB 3.0 (권장)</option>
+          <option value="3">EPUB 3.0</option>
           <option value="2">EPUB 2.0</option>
         </select>
 
