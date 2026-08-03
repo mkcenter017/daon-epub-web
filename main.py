@@ -247,7 +247,7 @@ async def index():
     <body>
     <div id="login-gate" style="position:fixed;inset:0;background:#ffffff;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:sans-serif;">
   <h2 style="margin:0;">다온북스 베타 서비스</h2>
-  <p style="color:#555;">계속하려면 구글 계정으로 로그인해주세요.</p>
+  <p style="color:#555;">베타테스트 참여자 확인을 위해 구글 로그인이 필요합니다.</p>
   <button id="google-login-btn" style="padding:12px 28px;font-size:16px;border:none;border-radius:8px;background:#4285F4;color:white;cursor:pointer;">
     구글 계정으로 로그인
   </button>
