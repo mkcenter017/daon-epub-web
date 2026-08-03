@@ -245,6 +245,56 @@ async def index():
     </style>
     </head>
     <body>
+    <div id="login-gate" style="position:fixed;inset:0;background:#ffffff;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:sans-serif;">
+  <h2 style="margin:0;">다온북스 베타 서비스</h2>
+  <p style="color:#555;">계속하려면 구글 계정으로 로그인해주세요.</p>
+  <button id="google-login-btn" style="padding:12px 28px;font-size:16px;border:none;border-radius:8px;background:#4285F4;color:white;cursor:pointer;">
+    구글 계정으로 로그인
+  </button>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<script>
+  const firebaseConfig = {{
+    apiKey: "AIzaSyCSv6GO8mQOkZUpXTqj7X8IHQYM49npFM4",
+    authDomain: "daonbooks-be849.firebaseapp.com",
+    projectId: "daonbooks-be849"
+  }};
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+
+  function logEvent(eventType, toolName) {{
+    const user = firebase.auth().currentUser;
+    db.collection('events').add({{
+      site: window.location.hostname,
+      event_type: eventType,
+      tool_name: toolName || null,
+      user_email: user ? user.email : null,
+      timestamp: firebase.firestore.FieldValue.serverTimestamp()
+    }}).catch((err) => console.error('기록 실패', err));
+  }}
+
+  const gate = document.getElementById('login-gate');
+  const loginBtn = document.getElementById('google-login-btn');
+  const provider = new firebase.auth.GoogleAuthProvider();
+
+  loginBtn.addEventListener('click', () => {{
+    firebase.auth().signInWithPopup(provider).catch((err) => {{
+      alert('로그인 실패: ' + err.message);
+    }});
+  }});
+
+  firebase.auth().onAuthStateChanged((user) => {{
+    if (user) {{
+      gate.style.display = 'none';
+      logEvent('visit', '이펍변환기');
+    }} else {{
+      gate.style.display = 'flex';
+    }}
+  }});
+</script>
       <h1>다온 EPUB 변환기 (웹)</h1>
       <div class="notice">
         현재는 워드(.docx) 파일만 지원합니다.<br>
