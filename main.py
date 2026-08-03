@@ -354,6 +354,7 @@ async def index():
 
           try {{
             const res = await fetch('/convert', {{ method: 'POST', body: formData }});
+            if (res.ok && typeof logEvent === 'function') logEvent('download', '이펍변환기');
             if (!res.ok) {{
               const err = await res.json().catch(() => ({{}}));
               throw new Error(err.detail || '변환 중 오류가 발생했습니다.');
